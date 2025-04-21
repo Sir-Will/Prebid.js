@@ -511,43 +511,70 @@ export const processPBSRequest = hook('sync', function (s2sBidRequest, bidReques
   events.emit(EVENTS.BEFORE_PBS_HTTP, requestData)
   logInfo('BidRequest: ' + requestData);
   if (request && requestData.requestJson && requestData.endpointUrl) {
-    const networkDone = s2sBidRequest.metrics.startTiming('net');
-    ajax(
-      requestData.endpointUrl,
-      {
-        success: function (response) {
-          networkDone();
-          let result;
-          try {
-            result = JSON.parse(response);
-            const {bids, paapi} = s2sBidRequest.metrics.measureTime('interpretResponse', () => interpretPBSResponse(result, request));
-            bids.forEach(onBid);
-            if (paapi) {
-              paapi.forEach(onFledge);
+    new Promise((resolve) => {
+      requestData.customHeaders['Content-Encoding'] = 'gzip';
+      // Convert the string to a byte stream.
+      const stream = new Blob([requestData.requestJson], { type: 'application/json' }).stream();
+      // Create a compressed stream.
+      const compressedStream = stream.pipeThrough(
+        new CompressionStream("gzip")
+      );
+
+      (async () => {
+        // Read all the bytes from this stream.
+        // const chunks = [];
+        // for await (const chunk of compressedStream) {
+        //   chunks.push(chunk);
+        // }
+        // resolve(chunks);
+
+        const compressedResponse = new Response(compressedStream);
+        const blob = await compressedResponse.blob();
+        // const buffer = await blob.arrayBuffer();
+        // const bufferView = new Uint8Array(buffer);
+        // resolve(new TextDecoder().decode(bufferView));
+        resolve(blob)
+        // resolve(await blob.text())
+      })();
+    }).then((compressedData) => {
+      const networkDone = s2sBidRequest.metrics.startTiming('net');
+      ajax(
+        requestData.endpointUrl,
+        {
+          success: function (response) {
+            networkDone();
+            let result;
+            try {
+              result = JSON.parse(response);
+              const {bids, paapi} = s2sBidRequest.metrics.measureTime('interpretResponse', () => interpretPBSResponse(result, request));
+              bids.forEach(onBid);
+              if (paapi) {
+                paapi.forEach(onFledge);
+              }
+            } catch (error) {
+              logError(error);
             }
-          } catch (error) {
-            logError(error);
-          }
-          if (!result || (result.status && includes(result.status, 'Error'))) {
-            logError('error parsing response: ', result ? result.status : 'not valid JSON');
-            onResponse(false, requestedBidders);
-          } else {
-            onResponse(true, requestedBidders, result);
+            if (!result || (result.status && includes(result.status, 'Error'))) {
+              logError('error parsing response: ', result ? result.status : 'not valid JSON');
+              onResponse(false, requestedBidders);
+            } else {
+              onResponse(true, requestedBidders, result);
+            }
+          },
+          error: function () {
+            networkDone();
+            onError.apply(this, arguments);
           }
         },
-        error: function () {
-          networkDone();
-          onError.apply(this, arguments);
+        compressedData,
+        {
+          contentType: 'text/plain',
+          withCredentials: true,
+          browsingTopics: isActivityAllowed(ACTIVITY_TRANSMIT_UFPD, s2sActivityParams(s2sBidRequest.s2sConfig)),
+          customHeaders: requestData.customHeaders
         }
-      },
-      requestData.requestJson,
-      {
-        contentType: 'text/plain',
-        withCredentials: true,
-        browsingTopics: isActivityAllowed(ACTIVITY_TRANSMIT_UFPD, s2sActivityParams(s2sBidRequest.s2sConfig)),
-        customHeaders: requestData.customHeaders
-      }
-    );
+      );
+    });
   } else {
     logError('PBS request not made.  Check endpoints.');
   }
